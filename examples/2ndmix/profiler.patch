@@ -1,0 +1,164 @@
+--- 2ndmix.c
++++ 2ndmix.c
+@@ -18,6 +18,10 @@
+ #include <kos.h>
+ #include <stdlib.h>
+ #include <assert.h>
++#include <visprof/visprof.h>
++
++static visprof_phase_t phase_wait, phase_stars, phase_cubes, phase_text;
++static uint32_t drawn_stars, drawn_cubes, drawn_letters;
+ 
+ /* Floating-point Sin/Cos; 256 angles, -1.0 to 1.0 */
+ #include "sintab.h"
+@@ -163,6 +167,7 @@
+         if(x1 > -320 && y1 > -240 && x1 < 320 && y1 < 240) {
+             c = (zn * 256 / 640) & 0xff;
+             poly_pnt(x1 + 320, y1 + 240, 1.0f, 4.0f, 255 - c);
++            ++drawn_stars;
+         }
+         else {
+             star_z[i] = 640;
+@@ -229,6 +234,7 @@
+     if(cubesizes[which] < 0.1f)
+         return;
+ 
++    ++drawn_cubes;
+     ra = (rotang * 2) % 256;
+     ra = (ra + 42 * which) % 256; /* heh */
+     ra2 = (rotang / 2);
+@@ -555,6 +561,8 @@
+     if(index == -1)
+         return;
+ 
++    ++drawn_letters;
++
+     vert.flags = PVR_CMD_VERTEX;
+     vert.x = x1;
+     vert.y = y1 + FONT_HEIGHT * FONT_DOUBLE;
+@@ -793,22 +801,42 @@
+ 
+ int framecnt = 0;
+ void draw_one_frame(void) {
+-    /* Begin opaque polygons */
++    drawn_stars = drawn_cubes = drawn_letters = 0;
++    /* The first list waits for the tile accelerator. */
++    visprof_phase_begin(phase_wait);
+     pvr_scene_begin();
+     pvr_list_begin(PVR_LIST_OP_POLY);
++    visprof_phase_end(phase_wait);
+ 
+     /* Draw stars */
+-    stars_one_frame();
++    visprof_phase_begin(phase_stars);
++    {
++        VISPROF_SCOPE("stars");
++        stars_one_frame();
++    }
++    visprof_phase_end(phase_stars);
+ 
+     /* Begin translucent polygons */
+     pvr_list_finish();
+     pvr_list_begin(PVR_LIST_TR_POLY);
+ 
+     /* Draw cubes */
+-    cubes_one_frame();
++    visprof_phase_begin(phase_cubes);
++    {
++        VISPROF_SCOPE("cubes");
++        cubes_one_frame();
++    }
++    visprof_phase_end(phase_cubes);
+ 
+     /* Draw scrolly */
+-    font_one_frame();
++    visprof_phase_begin(phase_text);
++    {
++        VISPROF_SCOPE("text");
++        font_one_frame();
++    }
++    visprof_phase_end(phase_text);
++
++    visprof_draw();
+ 
+     /* Finish up */
+     pvr_list_finish();
+@@ -818,14 +846,10 @@
+ }
+ 
+ pvr_init_params_t params = {
+-    /* Enable opaque and translucent polygons with size 16 */
+-    { PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_0 },
+-
+-    /* Vertex buffer size 512K */
+-    512 * 1024,
+-
+-    /* Defaults for the rest */
+-    0, 0, 0, 0, 0
++    .opb_sizes = { PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16,
++                   PVR_BINSIZE_0, PVR_BINSIZE_0 },
++    .vertex_buf_size = 512 * 1024,
++    .opb_overflow_count = 3
+ };
+ 
+ KOS_INIT_FLAGS(INIT_DEFAULT);
+@@ -834,6 +858,7 @@
+ int main(int argc, const char *argv[]) {
+     maple_device_t *cont;
+     cont_state_t *state;
++    uint32_t held = 0;
+ 
+     printf("2ndMix/KallistiOS starting\n");
+ 
+@@ -848,9 +873,24 @@
+     printf("Loading music\n");
+     play_s3m("/rd/e-79014.s3m");
+ 
++    visprof_config_t cfg = { 0 };
++    cfg.text_scale = 0.5f;
++    cfg.anchor = VISPROF_TOP_LEFT;
++    const int profiler_status = visprof_init(&cfg);
++    printf("2ndmix: profiler init=%d\n", profiler_status);
++    phase_wait = visprof_phase_register("PVR wait", 0);
++    phase_stars = visprof_phase_register("Stars", 0);
++    phase_cubes = visprof_phase_register("Cubes", 0);
++    phase_text = visprof_phase_register("Text", 0);
++    visprof_counter_register("stars", &drawn_stars);
++    visprof_counter_register("cubes", &drawn_cubes);
++    visprof_counter_register("text chars", &drawn_letters);
++    visprof_set_visible(1);
++
+     printf("Starting display\n");
+ 
+     while(1) {
++        visprof_frame_begin();
+         if((cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER)) != NULL) {
+             state = (cont_state_t *)maple_dev_status(cont);
+ 
+@@ -859,10 +899,25 @@
+ 
+             if(state->buttons & CONT_START)
+                 break;
++
++            const uint32_t pressed = state->buttons & ~held;
++            held = state->buttons;
++            if(pressed & CONT_A)
++                visprof_set_visible(!visprof_visible());
++            if(pressed & CONT_B)
++                visprof_set_mode(visprof_get_mode() == VISPROF_INCLUSIVE
++                                 ? VISPROF_EXCLUSIVE : VISPROF_INCLUSIVE);
++            if(pressed & CONT_DPAD_RIGHT)
++                visprof_set_anchor((visprof_anchor_t)((visprof_get_anchor() + 1) % 9));
+         }
+ 
+         draw_one_frame();
+-    }
++        visprof_frame_end();
++    }
++
++    pvr_wait_ready();
++    pvr_wait_render_done();
++    visprof_shutdown();
+ 
+     /* Clean up what we allocated */
+     free(charmap);

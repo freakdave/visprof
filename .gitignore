@@ -1,0 +1,17 @@
+# KOS build products
+*.o
+*.a
+*.d
+*.elf
+*.bin
+1ST_READ.BIN
+IP.BIN
+romdisk.img
+romdisk*.o
+
+# disc images
+*.cdi
+*.iso
+
+# build-mode stamp (see Makefile)
+.build-mode
