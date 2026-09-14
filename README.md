@@ -108,5 +108,5 @@ make VISPROF_ENABLED=0
 See [third-party notices](THIRD-PARTY.md) for KOS and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
 
 ## 🤖 Note on AI Usage
-Visprof was developed with the assistance of Codex Astra (via ChatGPT). <br>
+Visprof was developed with the assistance of OpenAI Codex Astra (CLI). <br>
 All AI-generated code, algorithms, and structures have been manually reviewed and tested!
