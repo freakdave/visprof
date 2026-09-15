@@ -63,7 +63,9 @@ for (;;) {
 }
 ```
 
-- Draw in the open translucent list using direct rendering, after your scene.<br><br>
+- Draw in the open translucent list, after your scene. Direct rendering is the
+  default; set `reserve` and `commit` to have the records written into memory
+  you own and submit them yourself.<br><br>
 - Use `pvr_init_defaults()` or provide translucent bins and enough polygon-list
   overflow space. <br>
   Both examples set `opb_overflow_count = 3`. Insufficient space causes missing geometry / tiling glitches on hardware! <br><br>
@@ -85,7 +87,8 @@ Each function is documented in the [public header](include/visprof/visprof.h).
 - FPS uses actual elapsed time in both modes. <br><br>
 - `med` and `max` describe the frame history. <br><br>
 - The captured phase and zone timings belong to one retained frame, which can differ from the history maximum. <br><br>
-- Counters and `prof` show values from the last completed frame. <br><br>
+- Counters show the value sampled at the frame of the last text rebuild, and
+  `prof` is the mean profiler cost over the frames since that rebuild. <br><br>
 
 The library supports four phases, 32 zones per frame and 16 application
 counters. Its font atlas uses 64 KiB of video memory.

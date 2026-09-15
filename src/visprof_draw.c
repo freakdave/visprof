@@ -46,6 +46,8 @@ static pvr_ptr_t      vp_atlas;
 static pvr_poly_hdr_t vp_hdr_col;
 static pvr_poly_hdr_t vp_hdr_txr;
 
+vp_uv_t visprof_uv[VP_GLYPH_COUNT];
+
 static uint16_t vp_argb1555(uint32_t argb) {
     return (uint16_t)(0x8000u
         | ((argb >> 9) & 0x7C00u)
@@ -155,10 +157,29 @@ static void vp_bake_half(uint16_t *cell, int ch, uint16_t fg, uint16_t bg) {
             cell[y * VP_ATLAS_W + x] = half[y * VP_HALF_W + x] ? fg : bg;
 }
 
+/* One pass over 95 cells replaces four divisions for each of about 260 glyphs
+ * a frame. The cell size is fixed; only the glyph size changes with the text
+ * scale, and that is already chosen before the atlas is baked. */
+static void vp_bake_uv_table(void) {
+    for (int ch = VP_FIRST_CH; ch <= VP_LAST_CH; ++ch) {
+        const int idx = ch - VP_FIRST_CH;
+        const float cx = (float)((idx % VP_COLS) * VP_CELL_W);
+        const float cy = (float)((idx / VP_COLS) * VP_CELL_H);
+        visprof_uv[idx].u0 = cx / (float)VP_ATLAS_W;
+        visprof_uv[idx].v0 = cy / (float)VP_ATLAS_H;
+        visprof_uv[idx].u1 = (cx + visprof_g.glyph_w) / (float)VP_ATLAS_W;
+        visprof_uv[idx].v1 = (cy + visprof_g.glyph_h) / (float)VP_ATLAS_H;
+    }
+}
+
 int visprof_atlas_bake(uint32_t panel_argb, int half) {
     const size_t pixels = (size_t)VP_ATLAS_W * VP_ATLAS_H;
     const size_t bytes = pixels * 2u;
     pvr_poly_cxt_t cxt;
+
+    /* Before any early return: a failed bake leaves the graph drawing, and
+     * the table must never hold coordinates from an earlier text scale. */
+    vp_bake_uv_table();
 
     /* A valid untextured header is required even if atlas creation fails. */
     pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
@@ -219,15 +240,61 @@ void visprof_atlas_free(void) {
     }
 }
 
-static void vp_submit_hdr(const pvr_poly_hdr_t *src) {
-    pvr_poly_hdr_t *dst = (pvr_poly_hdr_t *)pvr_dr_target();
-    *dst = *src;
-    pvr_dr_commit(dst);
+/* One polygon header is 32 bytes; one quad is four 32-byte vertex records. */
+#define VP_SPAN_HDR_BYTES  ((uint32_t)sizeof(pvr_poly_hdr_t))
+#define VP_SPAN_QUAD_BYTES ((uint32_t)(4u * sizeof(pvr_vertex_t)))
+
+/* The public header promises a host that every span is a multiple of 32 bytes
+ * and never larger than VISPROF_SINK_MAX_SPAN. This fails the build if a KOS
+ * record size ever stops agreeing with that promise. */
+typedef char vp_span_size_check[(VP_SPAN_HDR_BYTES == 32u
+        && VP_SPAN_QUAD_BYTES == (uint32_t)VISPROF_SINK_MAX_SPAN) ? 1 : -1];
+
+/* Two submission paths, chosen once at initialization. */
+typedef enum {
+    VP_SPAN_DIRECT = 0, /* no sink: write the store queues */
+    VP_SPAN_SINK   = 1, /* write into the span the host reserved */
+    VP_SPAN_DROP   = 2  /* the host refused the span: write nothing */
+} vp_span_state_t;
+
+/* Ask the host for one span. Without a sink there is nothing to ask and the
+ * caller writes the store queues instead. */
+static vp_span_state_t vp_span_begin(uint32_t bytes, void **span) {
+    *span = NULL;
+    if (visprof_g.cfg.reserve == NULL)
+        return VP_SPAN_DIRECT;
+    *span = visprof_g.cfg.reserve(bytes, visprof_g.cfg.user);
+    return (*span != NULL) ? VP_SPAN_SINK : VP_SPAN_DROP;
 }
 
-static void vp_vertex(float x, float y, float z, float u, float v,
+/* A host that refuses a header span must refuse the vertex spans behind it
+ * too, or the tile accelerator sees vertices with no header. A monotonic
+ * cursor, the usual sink, does that by itself: no request is smaller than a
+ * header, so once one is refused every later one is refused as well. */
+static void vp_submit_hdr(const pvr_poly_hdr_t *src) {
+    void *span = NULL;
+    const vp_span_state_t state = vp_span_begin(VP_SPAN_HDR_BYTES, &span);
+    if (state == VP_SPAN_DROP)
+        return;
+
+    pvr_poly_hdr_t *dst = (state == VP_SPAN_SINK)
+        ? (pvr_poly_hdr_t *)span
+        : (pvr_poly_hdr_t *)pvr_dr_target();
+    *dst = *src;
+
+    if (state == VP_SPAN_SINK)
+        visprof_g.cfg.commit(span, VP_SPAN_HDR_BYTES, visprof_g.cfg.user);
+    else
+        pvr_dr_commit(dst);
+}
+
+/* One vertex record, written in place: into slot `i` of the reserved span, or
+ * into a store queue when there is none. No record is built on the stack and
+ * copied on either path. */
+static void vp_vertex(pvr_vertex_t *span, uint32_t i,
+                      float x, float y, float z, float u, float v,
                       uint32_t argb, uint32_t flags) {
-    pvr_vertex_t *dst = (pvr_vertex_t *)pvr_dr_target();
+    pvr_vertex_t *dst = (span != NULL) ? (span + i) : (pvr_vertex_t *)pvr_dr_target();
     dst->flags = flags;
     dst->x = x;
     dst->y = y;
@@ -236,37 +303,50 @@ static void vp_vertex(float x, float y, float z, float u, float v,
     dst->v = v;
     dst->argb = argb;
     dst->oargb = 0;
-    pvr_dr_commit(dst);
+    if (span == NULL)
+        pvr_dr_commit(dst);
 }
 
-/* Both quad paths use BL, TL, BR, TR winding for PVR_CULLING_CCW. */
+/* One quad is one span of four records. Both quad paths use BL, TL, BR, TR
+ * winding for PVR_CULLING_CCW and close the strip on the fourth. A refused
+ * span drops the WHOLE quad, so no partial strip ever reaches the tile
+ * accelerator. Returns 1 when the quad was written. */
+static int vp_quad(float x1, float y1, float x2, float y2,
+                   float u0, float v0, float u1, float v1,
+                   uint32_t argb, float z) {
+    void *span = NULL;
+    if (vp_span_begin(VP_SPAN_QUAD_BYTES, &span) == VP_SPAN_DROP)
+        return 0;
+
+    pvr_vertex_t *rec = (pvr_vertex_t *)span;
+    vp_vertex(rec, 0u, x1, y2, z, u0, v1, argb, PVR_CMD_VERTEX);
+    vp_vertex(rec, 1u, x1, y1, z, u0, v0, argb, PVR_CMD_VERTEX);
+    vp_vertex(rec, 2u, x2, y2, z, u1, v1, argb, PVR_CMD_VERTEX);
+    vp_vertex(rec, 3u, x2, y1, z, u1, v0, argb, PVR_CMD_VERTEX_EOL);
+
+    if (rec != NULL)
+        visprof_g.cfg.commit(span, VP_SPAN_QUAD_BYTES, visprof_g.cfg.user);
+    return 1;
+}
+
+/* The counters report what was submitted, so a dropped quad counts for
+ * nothing: four vertex records always accompany each counted quad. */
 static void vp_rect(float x1, float y1, float x2, float y2, uint32_t argb, float z) {
-    vp_vertex(x1, y2, z, 0.0f, 0.0f, argb, PVR_CMD_VERTEX);
-    vp_vertex(x1, y1, z, 0.0f, 0.0f, argb, PVR_CMD_VERTEX);
-    vp_vertex(x2, y2, z, 0.0f, 0.0f, argb, PVR_CMD_VERTEX);
-    vp_vertex(x2, y1, z, 0.0f, 0.0f, argb, PVR_CMD_VERTEX_EOL);
-    ++visprof_g.rects_drawn;
+    if (vp_quad(x1, y1, x2, y2, 0.0f, 0.0f, 0.0f, 0.0f, argb, z))
+        ++visprof_g.rects_drawn;
 }
 
 static void vp_glyph(int ch, float x, float y, float w, float h) {
     if (ch < VP_FIRST_CH || ch > VP_LAST_CH)
         return;
-    const int idx = ch - VP_FIRST_CH;
-    const float cx = (float)((idx % VP_COLS) * VP_CELL_W);
-    const float cy = (float)((idx / VP_COLS) * VP_CELL_H);
-    const float u0 = cx / (float)VP_ATLAS_W;
-    const float v0 = cy / (float)VP_ATLAS_H;
-    const float u1 = (cx + visprof_g.glyph_w) / (float)VP_ATLAS_W;
-    const float v1 = (cy + visprof_g.glyph_h) / (float)VP_ATLAS_H;
+    const vp_uv_t *uv = &visprof_uv[ch - VP_FIRST_CH];
 
     x = (float)(int)(x + 0.5f);
     y = (float)(int)(y + 0.5f);
 
-    vp_vertex(x,     y + h, VP_Z_TEXT, u0, v1, VP_COL_TEXT, PVR_CMD_VERTEX);
-    vp_vertex(x,     y,     VP_Z_TEXT, u0, v0, VP_COL_TEXT, PVR_CMD_VERTEX);
-    vp_vertex(x + w, y + h, VP_Z_TEXT, u1, v1, VP_COL_TEXT, PVR_CMD_VERTEX);
-    vp_vertex(x + w, y,     VP_Z_TEXT, u1, v0, VP_COL_TEXT, PVR_CMD_VERTEX_EOL);
-    ++visprof_g.glyphs_drawn;
+    if (vp_quad(x, y, x + w, y + h, uv->u0, uv->v0, uv->u1, uv->v1,
+                VP_COL_TEXT, VP_Z_TEXT))
+        ++visprof_g.glyphs_drawn;
 }
 
 /* Merge adjacent equal heights to reduce entries in PVR tile lists.

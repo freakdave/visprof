@@ -86,7 +86,15 @@ void bfont_draw_str_vram_fmt(uint32_t x, uint32_t y, bool opaque, const char *fm
     ++panic_lines;
 }
 
+/* Every case below reads the panel text of the frame it just ran, so unless a
+ * case chose a refresh rate it gets the every-frame rate, which is what the
+ * library did before 0.4.0. The cadence has its own cases at the end. */
 static void reset(const visprof_config_t *cfg) {
+    visprof_config_t use = { 0 };
+    if (cfg != NULL)
+        use = *cfg;
+    if (use.text_refresh_hz == 0)
+        use.text_refresh_hz = VISPROF_TEXT_REFRESH_EVERY_FRAME;
     visprof_shutdown();
     now_ns = 1000000000;
     screen.width = 640;
@@ -95,7 +103,7 @@ static void reset(const visprof_config_t *cfg) {
     worker_cpu_ms = 0;
     test_irq_mask = 0;
     atlas_result = 0;
-    CHECK(visprof_init(cfg) == 0);
+    CHECK(visprof_init(&use) == 0);
 }
 static void frame(float ms) {
     visprof_frame_begin();
@@ -359,8 +367,163 @@ static void panic_bounds(void) {
     visprof_shutdown();
 }
 
+/* ── Text refresh cadence (0.4.0) ────────────────────────────────────────── */
+
+static uint32_t tick;
+
+/* A registered counter is the cheapest thing that changes what the panel
+ * says: it is sampled at every frame end, but only DRAWN when the text is
+ * rebuilt, so "tick 2" appears exactly when a rebuild happened. */
+static void cadence_start(uint32_t hz, float peak_ms) {
+    visprof_config_t cfg = { 0 };
+    cfg.history_len = 180;
+    cfg.text_refresh_hz = hz;
+    reset(&cfg);
+    visprof_counter_register("tick", &tick);
+    visprof_set_visible(1);
+    tick = 1;
+    /* One large frame first. It leaves a high retained peak, so the ordinary
+     * frames that follow are outside the ten percent capture band and do not
+     * force a rebuild of their own. */
+    frame(peak_ms);
+    CHECK(text_has("tick 1"));
+}
+
+static void cadence_clock(void) {
+    cadence_start(4, 60);            /* four rebuilds per second */
+    tick = 2;
+    /* Ten 16 ms frames are 160 ms, under the 250 ms period. */
+    for (unsigned i = 0; i < 10; ++i) frame(16);
+    CHECK(text_has("tick 1"));
+    CHECK(!text_has("tick 2"));
+    /* Six more cross 250 ms, so that frame end rebuilds. */
+    for (unsigned i = 0; i < 6; ++i) frame(16);
+    CHECK(text_has("tick 2"));
+    CHECK(!text_has("tick 1"));
+
+    /* The bars read the history every frame, so the graph is never stale:
+     * the sample the panel text was built from is already two frames old. */
+    tick = 3;
+    frame(16);
+    frame(24);
+    CHECK(!text_has("tick 3"));
+    CHECK(near(visprof_last_frame_ms(), 24));
+}
+
+/* Each event rebuilds the text at the next frame end, whatever the clock says.
+ * Every block spends two 16 ms frames, far inside the 250 ms period, so only
+ * the event can explain the rebuild. */
+static void cadence_events(void) {
+    cadence_start(4, 60);
+    tick = 2;
+    frame(16);
+    CHECK(!text_has("tick 2"));
+    visprof_set_mode(VISPROF_EXCLUSIVE);
+    frame(16);
+    CHECK(text_has("tick 2"));
+
+    tick = 3;
+    frame(16);
+    CHECK(!text_has("tick 3"));
+    visprof_set_anchor(VISPROF_TOP_RIGHT);
+    frame(16);
+    CHECK(text_has("tick 3"));
+
+    visprof_set_visible(0);
+    tick = 4;
+    frame(16);
+    CHECK(!text_has("tick 4"));
+    visprof_set_visible(1);
+    frame(16);
+    CHECK(text_has("tick 4"));
+
+    /* A spike raises the retained peak, so the captured frame, the phase
+     * breakdown and the zone box all changed. */
+    tick = 5;
+    frame(16);
+    CHECK(!text_has("tick 5"));
+    frame(90);
+    CHECK(text_has("tick 5"));
+    CHECK(text_has("captured frame 90.0 ms"));
+
+    /* A capture that only refreshes inside the ten percent band repeats the
+     * numbers already on the panel, so it waits for the cadence. */
+    tick = 6;
+    frame(85);
+    CHECK(near(visprof_g.top_frame_ms, 85));
+    CHECK(!text_has("tick 6"));
+}
+
+/* A thread scan rewrites the thread CPU line. It runs at most once per 60
+ * frames, so the frames here are short enough to stay inside one refresh
+ * period of a whole second. */
+static void cadence_thread_scan(void) {
+    visprof_config_t cfg = { 0 };
+    cfg.history_len = 4;
+    cfg.thief_scan = 1;
+    cfg.text_refresh_hz = 1;
+    reset(&cfg);
+    visprof_counter_register("tick", &tick);
+    worker_present = 1;
+    worker_cpu_ms = 20;
+    visprof_set_visible(1);
+    tick = 1;
+    frame(1);
+    CHECK(text_has("tick 1"));
+    tick = 2;
+    for (unsigned i = 0; i < 59; ++i) frame(1);
+    CHECK(visprof_g.last_scan_frame == 0);
+    CHECK(!text_has("tick 2"));
+    frame(1);
+    CHECK(visprof_g.last_scan_frame != 0);
+    CHECK(text_has("tick 2"));
+}
+
+/* `prof` on the panel is the mean over the frames since the last rebuild. */
+static void prof_mean(void) {
+    visprof_config_t cfg = { 0 };
+    cfg.history_len = 180;
+    cfg.text_refresh_hz = 16;        /* 62.5 ms between rebuilds */
+    reset(&cfg);
+    visprof_set_visible(1);
+    frame(60);
+    CHECK(text_has("prof 0.00 ms"));
+
+    static const uint64_t cost_ns[4] = { 1000000, 2000000, 3000000, 4000000 };
+    for (unsigned i = 0; i < 4; ++i) {
+        visprof_frame_begin();
+        now_ns += 16000000;
+        visprof_g.self_frame_ns = cost_ns[i];
+        visprof_frame_end();
+        if (i < 3)
+            CHECK(text_has("prof 0.00 ms"));   /* 48 ms: not due yet */
+    }
+    /* 64 ms crossed the period on the fourth frame. */
+    CHECK(text_has("prof 2.50 ms"));
+    CHECK(near(visprof_self_ms(), 4));
+
+    /* A hidden panel builds no text, so its frames belong to no interval. The
+     * reading that appears when it is shown again is that frame alone. */
+    visprof_set_visible(0);
+    for (unsigned i = 0; i < 20; ++i) {
+        visprof_frame_begin();
+        now_ns += 16000000;
+        visprof_g.self_frame_ns = 9000000;
+        visprof_frame_end();
+    }
+    CHECK(visprof_g.self_samples == 0);
+    CHECK(text_has("prof 2.50 ms"));
+    visprof_set_visible(1);
+    visprof_frame_begin();
+    now_ns += 16000000;
+    visprof_g.self_frame_ns = 1000000;
+    visprof_frame_end();
+    CHECK(text_has("prof 1.00 ms"));
+}
+
 int main(void) {
     timing(); capture(); median_zero_samples(); fps_readout(); layout(); threads(); panic_bounds();
+    cadence_clock(); cadence_events(); cadence_thread_scan(); prof_mean();
     printf("core: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

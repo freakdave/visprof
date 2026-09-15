@@ -15,11 +15,11 @@ run() {
 }
 require_file() { test -s "$1" || fail "Missing or empty file: $1"; }
 implementation_symbols() {
-    awk '$2 ~ /^[A-Za-z]$/ && !($2 == "W" && $3 ~ /^_visprof(_draw)?[.]c[.][[:xdigit:]]+$/) { print $3 }' "$1"
+    awk '$2 ~ /^[A-Za-z]$/ && !($2 == "W" && $3 ~ /^_visprof(_draw|_capture)?[.]c[.][[:xdigit:]]+$/) { print $3 }' "$1"
 }
 foreign_refs() {
     awk '$1 == "U" { print $2 }' "$1" | sort -u | awk '
-        !/^_(bfont_|pvr_|thd_|vid_|visprof_)/ &&
+        !/^_(bfont_|fs_|pvr_|thd_|vid_|visprof_)/ &&
         !/^_(malloc|free|memcpy|memmove|memset|snprintf|printf|puts|vsnprintf)$/ &&
         !/^(___dreamcast_get_ticks|___floatundisf|___udivsi3_i4i|__ctype_|_dbglog_level)$/ { print }'
 }
@@ -48,8 +48,20 @@ run gcc -std=gnu99 -Itests/stubs -Iinclude -Isrc -Wall -Wextra -Werror \
 run "$check_tmp/core"
 cat "$check_tmp/command.log"
 
+printf 'Span sink tests\n'
+run gcc -std=gnu99 -Itests/stubs -Iinclude -Isrc -Wall -Wextra -Werror \
+    -o "$check_tmp/draw_sink" src/visprof.c src/visprof_draw.c tests/draw_sink.c
+run "$check_tmp/draw_sink"
+cat "$check_tmp/command.log"
+
+printf 'Screen capture tests\n'
+run gcc -std=gnu99 -Itests/stubs -Iinclude -Isrc -Wall -Wextra -Werror \
+    -o "$check_tmp/capture" src/visprof.c src/visprof_capture.c tests/capture.c
+run "$check_tmp/capture"
+cat "$check_tmp/command.log"
+
 printf 'Strict KOS compilation\n'
-for source in src/visprof.c src/visprof_draw.c; do
+for source in src/visprof.c src/visprof_draw.c src/visprof_capture.c; do
     run kos-cc -Iinclude -Isrc -Wall -Wextra -Werror -Wshadow -Wcast-align \
         -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes -Wundef \
         -Wwrite-strings -c "$source" -o "$check_tmp/strict.o"

@@ -68,8 +68,41 @@ int visprof_init(const visprof_config_t *cfg) {
     if (visprof_g.cfg.text_scale <= 0.0f) visprof_g.cfg.text_scale = 1.0f;
     if (visprof_g.cfg.px_per_ms <= 0.0f) visprof_g.cfg.px_per_ms = 3.0f;
     if ((uint32_t)visprof_g.cfg.anchor > VISPROF_BOTTOM_RIGHT) visprof_g.cfg.anchor = VISPROF_TOP_LEFT;
+    if (visprof_g.cfg.text_refresh_hz == 0) visprof_g.cfg.text_refresh_hz = 4;
     if (visprof_g.cfg.mode != VISPROF_INCLUSIVE && visprof_g.cfg.mode != VISPROF_EXCLUSIVE)
         visprof_g.cfg.mode = VISPROF_INCLUSIVE;
+
+    /* Every record of one list must travel the same path. A reserve without a
+     * commit would leak the host's span and never publish it; a commit without
+     * a reserve would never be called. Either half alone also interleaves
+     * store-queue records with host records and corrupts the list, so an
+     * incomplete pair falls back to direct rendering. */
+    if ((visprof_g.cfg.reserve == NULL) != (visprof_g.cfg.commit == NULL)) {
+        printf("visprof: reserve and commit must be set together. "
+               "Using direct rendering.\n");
+        visprof_g.cfg.reserve = NULL;
+        visprof_g.cfg.commit = NULL;
+    }
+
+    /* A request file with nowhere to write the picture, or a directory with
+     * nothing asking for one, is half a feature. Fail closed, as the sink
+     * pair does. */
+    if ((visprof_g.cfg.capture_request == NULL) != (visprof_g.cfg.capture_dir == NULL)) {
+        printf("visprof: capture_request and capture_dir must be set together. "
+               "Capture disabled.\n");
+        visprof_g.cfg.capture_request = NULL;
+        visprof_g.cfg.capture_dir = NULL;
+    }
+    if (visprof_g.cfg.capture_poll_hz == 0)
+        visprof_g.cfg.capture_poll_hz = 1;
+    visprof_g.capture_poll_ns = 1000000000ull / visprof_g.cfg.capture_poll_hz;
+
+    /* The panel text is rebuilt on a wall clock, not on a frame count: the
+     * frame rate varies. VISPROF_TEXT_REFRESH_EVERY_FRAME divides to zero
+     * here, and a zero period is always due. */
+    visprof_g.text_interval_ns = 1000000000ull / visprof_g.cfg.text_refresh_hz;
+    visprof_g.last_build_ns = 0;
+    visprof_g.text_forced = 1;
 
     visprof_g.hist_len = visprof_g.cfg.history_len;
     visprof_g.canary_pre = VP_CANARY;
@@ -182,6 +215,11 @@ void visprof_frame_begin(void) {
     /* Consume the previous frame-end cost once. */
     visprof_g.carry_self_ns = 0;
     memset(visprof_g.self_phase_ns, 0, sizeof(visprof_g.self_phase_ns));
+    /* capture_frame_ns is NOT cleared here. A capture taken between two
+     * frames still belongs to the period that visprof_frame_end() closes,
+     * because that period starts at the previous frame end. Frame end clears
+     * it after subtracting it. */
+    memset(visprof_g.capture_phase_ns, 0, sizeof(visprof_g.capture_phase_ns));
 
     visprof_g.zone_count = 0;
     visprof_g.zone_dropped = 0;
@@ -218,6 +256,16 @@ void visprof_phase_end(visprof_phase_t p) {
     float ms = vp_elapsed_ms(visprof_g.phase_start_ns[p], vp_now_ns());
     if (visprof_g.cfg.mode == VISPROF_EXCLUSIVE) {
         ms -= vp_ns_to_ms(visprof_g.self_phase_ns[p]);
+        if (ms < 0.0f)
+            ms = 0.0f;
+    }
+    /* A capture leaves the phase in both modes. See visprof_capture.c. It is
+     * consumed here: a second begin/end pair for the same phase in one frame
+     * overwrites the value, and that second pair did not pay for the capture
+     * the first one did. */
+    if (visprof_g.capture_phase_ns[p] != 0) {
+        ms -= vp_ns_to_ms(visprof_g.capture_phase_ns[p]);
+        visprof_g.capture_phase_ns[p] = 0;
         if (ms < 0.0f)
             ms = 0.0f;
     }
@@ -269,15 +317,16 @@ typedef struct {
     char       best_label[24];
 } vp_scan_ctx_t;
 
-static void vp_copy_label(char *dst, size_t dst_size, const char *src) {
-    size_t i = 0;
+/* Copy at most dst_size - 1 bytes and terminate. The panel's text lines are
+ * copied, never parsed, so this replaces a formatting call per line. */
+static void vp_copy_bounded(char *dst, size_t dst_size, const char *src) {
+    size_t n = 0;
     if (dst_size == 0)
         return;
-    while (i + 1 < dst_size && src[i] != '\0') {
-        dst[i] = src[i];
-        ++i;
-    }
-    dst[i] = '\0';
+    while (n + 1 < dst_size && src[n] != '\0')
+        ++n;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
 }
 
 static int vp_scan_thread(kthread_t *thd, void *user) {
@@ -307,7 +356,7 @@ static int vp_scan_thread(kthread_t *thd, void *user) {
     slot->cpu_ms = cpu_ms;
     if (delta > ctx->best_delta_ms) {
         ctx->best_delta_ms = delta;
-        vp_copy_label(ctx->best_label, sizeof(ctx->best_label), thd->label);
+        vp_copy_bounded(ctx->best_label, sizeof(ctx->best_label), thd->label);
     }
     return 0;
 }
@@ -411,7 +460,7 @@ static vp_text_t *vp_push_text(float x, float y, const char *s) {
     vp_text_t *t = &visprof_g.text[visprof_g.text_count++];
     t->x = x;
     t->y = y;
-    snprintf(t->s, sizeof(t->s), "%.*s", (int)sizeof(t->s) - 1, s);
+    vp_copy_bounded(t->s, sizeof(t->s), s);
     return t;
 }
 
@@ -492,7 +541,7 @@ static uint32_t vp_counter_lines(char out[][VP_LINE_CHARS], size_t *chars) {
         char value[16];
         if (i == 0) {
             name = "prof";
-            snprintf(value, sizeof(value), "%.2f ms", (double)visprof_g.self_ms);
+            snprintf(value, sizeof(value), "%.2f ms", (double)visprof_g.display_self_ms);
         } else {
             name = visprof_g.counter[i - 1].name;
             snprintf(value, sizeof(value), "%u", (unsigned)visprof_g.counter[i - 1].shown);
@@ -521,6 +570,27 @@ static uint32_t vp_counter_lines(char out[][VP_LINE_CHARS], size_t *chars) {
             *chars = slot;
     }
     return row + 1;
+}
+
+/* The panel shows the MEAN profiler cost over the frames since the last text
+ * rebuild. One frame's value moves by about a tenth of a millisecond, and the
+ * panel now stands for a quarter of a second, so a single sample would read as
+ * a number that jumps for no reason. visprof_self_ms() is unchanged. */
+static float vp_take_self_mean(void) {
+    const float mean = (visprof_g.self_samples > 0u)
+        ? visprof_g.self_sum_ms / (float)visprof_g.self_samples
+        : visprof_g.self_ms;
+    visprof_g.self_sum_ms = 0.0f;
+    visprof_g.self_samples = 0u;
+    return mean;
+}
+
+/* A rebuild is due on the clock, or at once when an event changed what the
+ * text says. A zero period makes every frame due. */
+static int vp_text_due(uint64_t now_ns) {
+    if (visprof_g.text_forced)
+        return 1;
+    return (now_ns - visprof_g.last_build_ns) >= visprof_g.text_interval_ns;
 }
 
 static float vp_clampf(float v, float lo, float hi) {
@@ -707,10 +777,30 @@ void visprof_frame_end(void) {
     vp_sample_t *s = &visprof_g.hist[visprof_g.index];
     s->frame_ms = vp_elapsed_ms(visprof_g.frame_start_ns, now);
 
+    /* Take the capture out before anything reads this sample: the spike log,
+     * the retained-frame capture and the statistics all run below, and a
+     * screenshot is not a frame the reader is meant to see in the graph. */
+    if (visprof_g.capture_frame_ns != 0) {
+        s->frame_ms -= vp_ns_to_ms(visprof_g.capture_frame_ns);
+        if (s->frame_ms < 0.0f)
+            s->frame_ms = 0.0f;
+        visprof_g.capture_frame_ns = 0;
+    }
+
     vp_update_fps(now);
     visprof_g.last_end_ns = now;
 
     visprof_g.self_ms = (float)visprof_g.self_frame_ns * 1.0e-6f;
+    /* Only frames the panel is showing belong in its mean. A hidden panel
+     * builds no text, so an unguarded sum would run for as long as the panel
+     * stays hidden and be shown as one stale reading when it appears. */
+    if (visprof_g.visible) {
+        visprof_g.self_sum_ms += visprof_g.self_ms;
+        ++visprof_g.self_samples;
+    } else {
+        visprof_g.self_sum_ms = 0.0f;
+        visprof_g.self_samples = 0u;
+    }
     if (visprof_g.cfg.mode == VISPROF_EXCLUSIVE) {
         s->frame_ms -= visprof_g.self_ms;
         if (s->frame_ms < 0.0f)
@@ -740,9 +830,17 @@ void visprof_frame_end(void) {
     /* Compare with a retained peak to prevent repeated 10% reductions. */
     const int expired = (visprof_g.frame_count - visprof_g.top_capture_frame) >= visprof_g.hist_len;
     if (s->frame_ms < 500.0f && (expired || s->frame_ms >= 0.9f * visprof_g.top_peak_ms)) {
+        const int fresh = (expired || s->frame_ms > visprof_g.top_peak_ms);
         vp_capture_top(s->frame_ms);
-        if (expired || s->frame_ms > visprof_g.top_peak_ms)
+        if (fresh) {
             visprof_g.top_peak_ms = s->frame_ms;
+            /* A spike, or a reference that aged out: show it at once. A
+             * capture that only refreshes inside the ten percent band repeats
+             * numbers the reader already sees, and happens on nearly every
+             * frame once the frame time is steady, so it waits for the
+             * cadence. */
+            visprof_g.text_forced = 1;
+        }
     }
 
     if (visprof_g.cfg.thief_scan && visprof_g.scan_armed && visprof_g.frame_count - visprof_g.last_scan_frame >= 60) {
@@ -752,6 +850,7 @@ void visprof_frame_end(void) {
         const uint64_t scan_start = vp_now_ns();
         vp_scan_threads();
         visprof_g.pending_scan_ms = vp_elapsed_ms(scan_start, vp_now_ns());
+        visprof_g.text_forced = 1;  /* The thread CPU line changed. */
     }
 
     vp_sample_counters();
@@ -762,20 +861,35 @@ void visprof_frame_end(void) {
     /* Clear the next slot so omitted phases cannot retain old samples. */
     memset(&visprof_g.hist[visprof_g.index], 0, sizeof(visprof_g.hist[visprof_g.index]));
 
-    if (visprof_g.visible)
+    /* Between rebuilds the text lines, the swatches and the panel geometry
+     * stand. visprof_draw() reads the history ring every frame, so the graph
+     * keeps moving whatever the cadence is. */
+    if (visprof_g.visible && vp_text_due(now)) {
+        visprof_g.last_build_ns = now;
+        visprof_g.text_forced = 0;
+        visprof_g.display_self_ms = vp_take_self_mean();
         vp_build_display();
+    }
 
     visprof_g.carry_self_ns = vp_elapsed_ns(now, vp_now_ns());
 }
 
-void visprof_set_visible(int on) { visprof_g.visible = (on != 0); }
+/* Each of these changes what the panel says, so the next frame end rebuilds
+ * the text whatever the refresh clock says. */
+void visprof_set_visible(int on) {
+    if (on != 0 && !visprof_g.visible)
+        visprof_g.text_forced = 1;
+    visprof_g.visible = (on != 0);
+}
 int  visprof_visible(void) { return visprof_g.visible; }
 void visprof_set_mode(visprof_mode_t mode) {
     visprof_g.cfg.mode = (mode == VISPROF_EXCLUSIVE) ? mode : VISPROF_INCLUSIVE;
+    visprof_g.text_forced = 1;
 }
 visprof_mode_t visprof_get_mode(void) { return visprof_g.cfg.mode; }
 void visprof_set_anchor(visprof_anchor_t anchor) {
     visprof_g.cfg.anchor = ((uint32_t)anchor > VISPROF_BOTTOM_RIGHT) ? VISPROF_TOP_LEFT : anchor;
+    visprof_g.text_forced = 1;
 }
 visprof_anchor_t visprof_get_anchor(void) { return visprof_g.cfg.anchor; }
 float visprof_self_ms(void) { return visprof_g.self_ms; }

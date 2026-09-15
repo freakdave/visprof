@@ -65,6 +65,7 @@ static inline uint64_t vp_elapsed_ns(uint64_t start_ns, uint64_t end_ns) {
 #define VP_FONT_H        24
 #define VP_FIRST_CH      32
 #define VP_LAST_CH      126
+#define VP_GLYPH_COUNT  (VP_LAST_CH - VP_FIRST_CH + 1)
 
 #define VP_LINE_CHARS    48
 #define VP_MAX_TEXTS     48
@@ -95,6 +96,10 @@ typedef struct { const char *name; const uint32_t *cell; uint32_t shown; } vp_co
 typedef struct { int tid; uint64_t cpu_ms; uint32_t seen_scan; } vp_thread_t;
 typedef struct { float x, y; char s[VP_LINE_CHARS]; } vp_text_t;
 typedef struct { float x, y; uint32_t argb; } vp_swatch_t;
+
+/* Atlas corners of one glyph cell, computed once when the atlas is baked so
+ * that drawing a glyph needs no division. */
+typedef struct { float u0, v0, u1, v1; } vp_uv_t;
 
 typedef struct {
     int inited;
@@ -148,6 +153,15 @@ typedef struct {
     uint64_t carry_self_ns;       /* Frame-end cost charged to the next frame. */
     float    self_ms;
 
+    /* Screen capture. Its cost is held apart from self_* because it is
+     * subtracted in BOTH timing modes: a capture is a one-shot operation the
+     * user asked for, not profiler overhead a `raw` reading should show. */
+    uint64_t capture_phase_ns[VISPROF_MAX_PHASES];
+    uint64_t capture_frame_ns;
+    uint64_t capture_poll_ns;     /* Period between two looks for a request. */
+    uint64_t capture_next_ns;     /* Wall clock of the next look. */
+    float    capture_ms;          /* Elapsed time of the last capture. */
+
     vp_thread_t thread[VP_MAX_THREADS];
     char        thread_line[VP_LINE_CHARS];
     uint32_t    last_scan_frame;
@@ -164,6 +178,13 @@ typedef struct {
     vp_swatch_t swatch[VISPROF_MAX_PHASES];
     uint32_t    swatch_count;
 
+    uint64_t text_interval_ns;  /* Rebuild period. Zero rebuilds every frame. */
+    uint64_t last_build_ns;     /* Wall clock of the last text rebuild. */
+    int      text_forced;       /* An event needs a rebuild at the next end. */
+    float    self_sum_ms;       /* Sum of self_ms since the last rebuild. */
+    uint32_t self_samples;      /* Frames in that sum. */
+    float    display_self_ms;   /* The mean the panel shows as `prof`. */
+
     float panel_x, panel_y, panel_w, panel_h;
     float graph_x, graph_base_y, graph_w, graph_h;
     float guide_x2;
@@ -175,6 +196,9 @@ typedef struct {
 } vp_state_t;
 
 extern vp_state_t visprof_g;
+
+/* Filled by visprof_atlas_bake(), indexed by character minus VP_FIRST_CH. */
+extern vp_uv_t visprof_uv[VP_GLYPH_COUNT];
 
 int  visprof_atlas_bake(uint32_t panel_argb, int half);
 void visprof_atlas_free(void);

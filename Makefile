@@ -1,10 +1,15 @@
 # Copyright (c) 2026 David Reichelt. SPDX-License-Identifier: MIT
 TARGET = libvisprof.a
-OBJS = src/visprof.o src/visprof_draw.o
+OBJS = src/visprof.o src/visprof_draw.o src/visprof_capture.o
 
 VISPROF_ENABLED ?= 1
 
-KOS_CFLAGS := $(filter-out -DVISPROF_ENABLED=%,$(KOS_CFLAGS))
+# -DDBGLOG_DISABLED is filtered out as well. Stock KOS_CFLAGS carry it, and it
+# turns KOS dbglog() into nothing for every translation unit that sees it —
+# which silently compiled the spike_log option away and left the feature dead
+# with no diagnostic. Only this library's own objects are affected; dbglog
+# itself is a real function in libkallisti.
+KOS_CFLAGS := $(filter-out -DVISPROF_ENABLED=% -DDBGLOG_DISABLED,$(KOS_CFLAGS))
 KOS_CFLAGS += -Iinclude -Isrc -DVISPROF_ENABLED=$(VISPROF_ENABLED)
 
 all: $(TARGET)
