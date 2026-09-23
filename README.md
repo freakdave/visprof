@@ -1,6 +1,6 @@
 # visprof
 
-An visual on-screen frame profiler for Dreamcast applications using KallistiOS.<br>
+A visual on-screen frame profiler for Dreamcast applications using KallistiOS.<br>
 Supports C99 with GNU extensions and C++11 or later.
 
 ![libvisprof in Flycast](docs/visprof-flycast.png)
@@ -13,7 +13,7 @@ make
 ```
 
 Add `-I<libvisprof>/include` to your compiler flags and
-`<libvisprof>/libvisprof.a` to your link command. <br>
+`<libvisprof>/libvisprof.a` to the link command. <br>
 The library depends on KOS and libc.
 
 ```sh
@@ -26,13 +26,13 @@ make clean                # remove all library and example build outputs
 `make check` also needs native GCC. The [2ndmix
 example](examples/2ndmix/README.md) uses source and assets from your KOS
 installation. <br>
-Both demos have been checked on Dreamcast hardware and in Flycast.
+Both demos have been tested on Dreamcast hardware and in Flycast.
 
 ## Usage
 
 Initialize after PVR setup. Register phases for parts of the frame and use
-`VISPROF_SCOPE` to time individual functions or blocks. <br>
-This example assumes `update()` and `draw_scene()` belong to your application:
+`VISPROF_SCOPE` to time functions or blocks. <br>
+Here, `update()` and `draw_scene()` stand in for your application code:
 
 ```c
 #include <kos.h>
@@ -63,12 +63,12 @@ for (;;) {
 }
 ```
 
-- Draw in the open translucent list, after your scene. Direct rendering is the
-  default; set `reserve` and `commit` to have the records written into memory
-  you own and submit them yourself.<br><br>
+- Draw the overlay after your scene, while the translucent list is open. Direct
+  rendering is the default. Set `reserve` and `commit` to write records into
+  memory you provide and submit them yourself.<br><br>
 - Use `pvr_init_defaults()` or provide translucent bins and enough polygon-list
   overflow space. <br>
-  Both examples set `opb_overflow_count = 3`. Insufficient space causes missing geometry / tiling glitches on hardware! <br><br>
+  Both examples set `opb_overflow_count = 3`. Too little space can cause missing geometry or tiling glitches on hardware. <br><br>
 - Keep scene depths below `1.00e9`, where the overlay begins.<br><br>
 - Call the profiler from one frame thread. Phases must not overlap. End every
   scope before `visprof_frame_end()`.<br><br>
@@ -85,8 +85,8 @@ Each function is documented in the [public header](include/visprof/visprof.h).
 - `adjusted` subtracts measured profiler overhead from frame and phase times. <br><br>
 - Zones always include child zones. Neither mode measures GPU execution time. <br><br>
 - FPS uses actual elapsed time in both modes. <br><br>
-- `med` and `max` describe the frame history. <br><br>
-- The captured phase and zone timings belong to one retained frame, which can differ from the history maximum. <br><br>
+- `med` and `max` describe completed frames in the history. <br><br>
+- Phase and zone timings come from one retained frame, which need not be the frame that set `max`. <br><br>
 - Counters show the value sampled at the frame of the last text rebuild, and
   `prof` is the mean profiler cost over the frames since that rebuild. <br><br>
 

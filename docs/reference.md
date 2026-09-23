@@ -94,9 +94,9 @@ after initialization.
 
 ## Text refresh
 
-The panel shows numbers a person reads. Rebuilding every line at every frame
-end formats about sixty values a frame and shows the reader nothing new, so
-the library rebuilds the text on a cadence instead.
+Formatting every panel value at every frame end costs work without making the
+numbers more useful. It would format about sixty values per frame, so the
+library rebuilds the text on a timed cadence instead.
 
 `text_refresh_hz` sets that cadence in hertz. Zero selects four rebuilds per
 second, the default. `VISPROF_TEXT_REFRESH_EVERY_FRAME` rebuilds at every frame
@@ -107,23 +107,23 @@ Between two rebuilds the text lines, the phase swatches, the panel size and
 the panel position all stand still. These events rebuild the text at the next
 frame end whatever the clock says:
 
-- the panel became visible, and the first frame end after initialization;
-- a captured frame RAISED the retained peak, or the previous capture expired,
-  so the `captured frame` line, the phase breakdown and the zone box changed;
-- a thread scan ran, so the `thread CPU` line changed;
+- the panel became visible, and the first frame end after initialization.
+- a captured frame raised the retained peak, or the previous capture expired,
+  so the `captured frame` line, the phase breakdown and the zone box changed.
+- a thread scan ran, so the `thread CPU` line changed.
 - `visprof_set_mode()` or `visprof_set_anchor()` was called.
 
 A capture that only refreshes the retained frame inside the ten percent
-tolerance does NOT rebuild the text. It repeats numbers already on the panel,
+tolerance does not rebuild the text. It repeats numbers already on the panel,
 and it happens on nearly every frame once the frame time is steady, so forcing
 a rebuild for it would remove the cadence.
 
 The graph is not text. `visprof_draw()` reads the history ring at every frame,
 so the bars and the red frame line keep moving at the frame rate whatever the
-cadence is. Counters are still sampled at every frame end; the panel shows the
+cadence is. Counters are still sampled at every frame end. The panel shows the
 value sampled at the frame of the last rebuild.
 
-`prof` changes meaning with the cadence. It is the mean profiler cost over the
+`prof` uses the same cadence. It is the mean profiler cost over the
 frames since the last rebuild, not one frame's sample, so it is a steady
 reading. `visprof_self_ms()` still answers with the last frame alone.
 
@@ -150,35 +150,35 @@ RGB555, RGB565, packed RGB888 and RGB0888. Width and height come from
 height. An interlaced framebuffer needs no other special handling: the two
 fields are one line apart in one linear image.
 
-Reading takes long enough that a display flip could matter, and it does not.
+The display can flip during a capture, but the buffer being read stays stable.
 The view changes only in the vertical blank handler, and only when a render
 has completed. This function blocks the frame thread, so no new scene is
 submitted while it runs: the render already in flight can complete and swap
 once, and nothing writes into the buffer being read.
 
-The call blocks. It is not free — reading a 640x480 16-bit framebuffer and
+Capture blocks the frame thread. Reading a 640x480 16-bit framebuffer and
 writing 921,600 bytes took 38.5 ms in an emulator writing to the KOS ramdisk,
 and a write over dc-load is slower. That time is measured, reported by
 `visprof_capture_ms()`, and subtracted from the frame and phase samples of the
-frame it happened in, in BOTH timing modes. `VISPROF_EXCLUSIVE` subtracts
-profiler overhead because a `raw` reading should show it; a screenshot the
-user asked for is not profiler overhead, so it leaves both readings. Without
+frame it happened in, in both timing modes. `VISPROF_EXCLUSIVE` subtracts
+profiler overhead because a `raw` reading should show it. A requested
+screenshot is separate work, so its cost is removed from both readings. Without
 that subtraction one capture would enter the history as a frame of over 100 ms,
 become the retained captured frame, and set `max` for the next `history_len`
-frames. The FPS row is NOT adjusted: it counts completed frames over real
+frames. The FPS row is not adjusted: it counts completed frames over real
 elapsed time, so a capture does lower it for one interval.
 
-`visprof_capture_poll()` is the hands-off path. Set `capture_request` and
+`visprof_capture_poll()` handles request-file captures. Set `capture_request` and
 `capture_dir` together, and the host calls this once a frame:
 
-- at `capture_poll_hz` (default one look per second) it opens `capture_request`;
+- at `capture_poll_hz` (default one look per second) it opens `capture_request`.
 - when that file exists it reads the first line as the wanted base name,
   accepts letters, digits, `-` and `_` up to `VISPROF_CAPTURE_NAME_MAX` (40)
-  characters, and uses `capture` for anything else, including an empty line;
-- it deletes the request before capturing, so one request is one picture;
+  characters, and uses `capture` for anything else, including an empty line.
+- it deletes the request before capturing, so one request is one picture.
 - it captures to `<capture_dir>/<name>.ppm`.
 
-Both strings `NULL`, the default, and the function returns at once and opens
+With both strings `NULL`, the default, the function returns at once and opens
 nothing. One of the two alone is a configuration error: `visprof_init()`
 clears both and prints a warning, as it does for half a span sink.
 
@@ -186,16 +186,16 @@ A quiet poll costs one failed file open per interval, and that cost leaves the
 frame and phase samples exactly as a capture's does. Measured on a Dreamcast
 over dcload-ip: most of those opens cost a few milliseconds, but about one in
 six took roughly 400 ms, which became the panel's `max` and its retained
-captured frame. A profiler that reports the cost of its own file system probe
-as the game's worst frame is lying about the game. A host that wants to know
-what the probe costs switches the feature off and compares.
+captured frame. Without excluding that probe, `max` would report filesystem
+latency as if it were game work. To measure the probe itself, disable polling
+and compare the timings.
 `capture_dir` carries no trailing separator.
-The directory must exist — neither dc-load's `/pc` nor the KOS ramdisk can
-create one — so on the ramdisk use `/ram` itself.
+The directory must exist. Neither dc-load's `/pc` nor the KOS ramdisk can
+create one, so on the ramdisk use `/ram` itself.
 
-`tools/capture.py` is the other end. It writes the request into the directory
-dc-tool serves as `/pc`, waits for the picture to appear and stop growing,
-and converts it to PNG with nothing but the Python standard library:
+Run `tools/capture.py` on the host. It writes a request to the directory
+dc-tool serves as `/pc`, waits until the picture stops growing, then converts
+it to PNG using only the Python standard library:
 
 ```
 tools/capture.py --root <dc-tool directory> --name shot1 --out shot1.png
@@ -281,7 +281,7 @@ void *reserve(uint32_t bytes, void *user);
 void  commit(void *span, uint32_t bytes, void *user);
 ```
 
-This exists because KOS prepares the store queues only for a list with no
+The span sink matters because KOS prepares store queues only for a list with no
 registered DMA vertex buffer. An application that routes its translucent list
 through such a buffer cannot use `pvr_dr_target()` and would otherwise have to
 change that routing for the frames that show the overlay. Where that buffer is
@@ -307,7 +307,7 @@ The contract:
   accelerator. A host that drops a header span must drop the vertex spans
   behind it as well, or the hardware sees vertices with no header. A monotonic
   cursor does that by itself: no request is smaller than a header.
-- The panel must still be the LAST translucent submission in a presorted
+- The panel must still be the last translucent submission in a presorted
   scene, because the sink only moves the records, not their depth.
 - The texture pointer inside the textured header addresses the font atlas and
   stays valid until `visprof_shutdown()`.
@@ -358,32 +358,32 @@ between enabled and disabled builds. It needs native GCC and uses at most two
 build jobs.
 
 The span sink tests compile `src/visprof_draw.c` for the host against a stub
-PVR and run the real drawing code through both paths. Without a sink every
-record reaches `pvr_dr_commit()`. With a sink the store queues stay untouched;
-every request is a multiple of 32 bytes and no larger than 128; every 32-byte
+PVR and run the real drawing code through both paths. Without a sink, every
+record reaches `pvr_dr_commit()`. With a sink, store queues stay untouched.
+Every request is a multiple of 32 bytes and no larger than 128. Every 32-byte
 span holds a header and every 128-byte span holds four vertices ending in
-`PVR_CMD_VERTEX_EOL`; each commit matches its own reserve; the sink is never
-re-entered between the two; and both paths submit the same number of records.
+`PVR_CMD_VERTEX_EOL`. Each commit matches its own reserve. The sink is never
+re-entered between the two. Both paths submit the same number of records.
 A reserve that returns `NULL` for one quad drops exactly that quad, produces
 no commit for it, and the rest of the draw still reaches the sink. The tests
 also cover an incomplete sink pair and a hidden overlay, and print the spans,
 bytes and records of one draw.
 
-The capture tests run the real reader against a stub video memory, stub
+The capture tests run the production reader against stub video memory, stub
 display registers and a stub filesystem. They check the PPM header and the
 body length, one pixel of each of the four framebuffer formats, an odd width
 and a second row at the right stride, that the picture follows the display
 register when it changes, and every refusal: no path, no mode, a mode too
-wide, the display disabled, an open that fails and a write that goes short —
-none of which leaves a file behind. The request state machine is covered as
+wide, the display disabled, an open that fails and a write that goes short.
+None of these leaves a file behind. The request state machine is covered as
 well: no configuration opens nothing at all, half a configuration is cleared
 at initialization, a quiet poll is one failed open per interval and no more,
 a request becomes exactly one picture named by its first line, the request is
 deleted before the picture is opened, and five kinds of unusable name all
 become `capture` while forty characters still count as a name. The capture's
-time leaves the frame and the phase in both timing modes.
+time is excluded from frame and phase timings in both modes.
 
-The text refresh is covered on both sides. In the timing tests the stub clock
+Timing and drawing tests both cover text refresh. In timing tests, the stub clock
 is advanced by hand: at four rebuilds per second the panel repeats its lines
 until 250 ms have passed, a mode change, an anchor change, the panel becoming
 visible, a spike capture and a thread scan each rebuild them at the next frame

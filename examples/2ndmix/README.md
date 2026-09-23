@@ -1,7 +1,7 @@
 # KOS 2ndmix with libvisprof
 
-This example instruments KOS's 2ndmix starfield, cubes and text display. The
-original music runs on the Dreamcast's AICA sound processor.
+This example adds timing to KOS's 2ndmix starfield, cubes and text display. The
+original music still runs on the Dreamcast's AICA sound processor.
 
 ## Build and run
 
@@ -12,14 +12,14 @@ make -j2
 ```
 
 Open `2ndmix-profiler.elf` in Flycast or load it through your Dreamcast
-loader. The ELF includes the original music in a ROM disk. No external runtime
-files are needed by the sample.
+loader. The ELF includes the original music in a ROM disk, so the sample needs
+no external runtime files.
 
 The Makefile reads the source, font, sound player and music from
-`$KOS_BASE/examples/dreamcast/2ndmix`. It applies `profiler.patch` to a local
-generated `2ndmix.c`. It does not modify the KOS checkout. GNU patch is
-required. A failed patch stops the build, so changes in upstream KOS may
-require updating the patch.
+`$KOS_BASE/examples/dreamcast/2ndmix`. It applies `profiler.patch` to a locally
+generated `2ndmix.c`. Your KOS checkout stays untouched. GNU patch is
+required. If the installed KOS sample changes, the patch may fail and need
+updating before the build can finish.
 
 For the original sample without instrumentation:
 
@@ -64,7 +64,7 @@ characters. These counters describe the last completed frame. Captured phase
 and zone timings both describe the retained frame.
 
 The overlay is submitted after the original text in the translucent list. The
-original geometry, animation and music path are unchanged. The PVR
+original geometry, animation and music paths stay unchanged. The PVR
 configuration reserves three extra polygon-list buffers for the overlay. Input
 and list transitions outside the four phases appear in `other`. PVR wait is
 elapsed waiting time, not GPU execution time. The profiler measures elapsed

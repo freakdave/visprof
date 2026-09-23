@@ -1,12 +1,12 @@
 # Third-party notices
 
-libvisprof itself is MIT licensed. See `LICENSE`.
+libvisprof is MIT licensed. See `LICENSE`.
 
 ## KallistiOS
 
-Programs linking KOS must include its copyright notice, conditions and
-disclaimer with their distribution. Use the notice from the KOS version
-you build against.
+If you distribute a program linked with KOS, include its copyright notice,
+conditions and disclaimer. Use the notice from the KOS version you built
+against.
 
 Quoted verbatim from `doc/license/LICENSE.KOS` in KallistiOS:
 
@@ -40,12 +40,12 @@ Quoted verbatim from `doc/license/LICENSE.KOS` in KallistiOS:
 > OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 > SUCH DAMAGE.
 
-The copyright years and the contributor list change between KOS
-releases. Check `doc/license/LICENSE.KOS` and `AUTHORS` in the version
-you build against, and copy from there.
+Copyright years and contributors vary between KOS releases. Check
+`doc/license/LICENSE.KOS` and `AUTHORS` in the version you build against,
+and copy the current notice from there.
 
 ## The Dreamcast BIOS font
 
 libvisprof reads the font from the console firmware through KOS
 `bfont_draw_ex()` during `visprof_init()`. The repository stores no glyph data.
-The atlas is built in memory at run time and is not an input asset.
+The atlas is built in memory at run time. It is not an input asset.
