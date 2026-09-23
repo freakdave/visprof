@@ -15,3 +15,7 @@ romdisk*.o
 
 # build-mode stamp (see Makefile)
 .build-mode
+
+# Python tool caches
+__pycache__/
+*.pyc
